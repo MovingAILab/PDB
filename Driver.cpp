@@ -8,6 +8,8 @@
  */
 
 #include <cstring>
+#include <algorithm>
+#include <cctype>
 #include "Common.h"
 #include "PermutationPDB.h"
 #include "LexPermutationPDB.h"
@@ -46,6 +48,7 @@ bool additive = false;
 bool load = false;
 bool delta = false;
 std::vector<int> pattern;
+std::vector<bool> patternNegative; // RC: entry was given as a negative value (track location only, not rotation)
 std::string path;
 int threads = std::thread::hardware_concurrency();
 int compression = 1;
@@ -160,10 +163,12 @@ int MyCLHandler(char *argument[], int maxNumArgs)
 	{
 		int cnt = 1;
 		maxNumArgs--;
-		while (maxNumArgs > 0 && argument[cnt][0] != '-')
+		// Negative numbers (e.g. -3, or -0) are pattern entries, not new flags
+		while (maxNumArgs > 0 && (argument[cnt][0] != '-' || isdigit(argument[cnt][1])))
 		{
 			maxNumArgs--;
-			pattern.push_back(atoi(argument[cnt]));
+			pattern.push_back(abs(atoi(argument[cnt])));
+			patternNegative.push_back(argument[cnt][0] == '-');
 			cnt++;
 		}
 		return cnt;
@@ -227,25 +232,38 @@ void BuildRC()
 	RubiksState goal;
 	goal.Reset();
 	
-	std::vector<int> edges;
-	std::vector<int> corners;
-	for (auto i : pattern)
+	// Pattern values 0-11 are edges and 12-19 are corners. A positive value tracks
+	// both the piece's location and its rotation; a negative value (e.g. -3, or -0
+	// for edge 0) tracks only the piece's location.
+	std::vector<int> edges, edgeRotations;
+	std::vector<int> corners, cornerRotations;
+	for (size_t x = 0; x < pattern.size(); x++)
 	{
+		int i = pattern[x];
+		bool trackRotation = !patternNegative[x];
 		if (i < 12)
 		{
 			edges.push_back(i);
+			if (trackRotation)
+				edgeRotations.push_back(i);
 		}
 		else {
 			corners.push_back(i-12);
+			if (trackRotation)
+				cornerRotations.push_back(i-12);
 		}
 	}
 	printf("\nEdges: ");
 	for (auto i : edges) printf("%d ", i);
+	printf("\nEdge rotations: ");
+	for (auto i : edgeRotations) printf("%d ", i);
 	printf("\nCorners: ");
 	for (auto i : corners) printf("%d ", i);
+	printf("\nCorner rotations: ");
+	for (auto i : cornerRotations) printf("%d ", i);
 	printf("\n");
 	
-	RubikPDB pdb(&cube, goal, edges, corners);
+	RubikPDB pdb(&cube, goal, edges, edgeRotations, corners, cornerRotations);
 	if (load)
 	{
 		if (pdb.Load(path.c_str()))
@@ -264,8 +282,16 @@ void BuildRC()
 			edges.resize(4);
 		if (corners.size() > 4)
 			corners.resize(4);
+		// Rotations can only be tracked for pieces whose locations are still tracked
+		auto keepTracked = [](std::vector<int> &rotations, const std::vector<int> &locations) {
+			rotations.erase(std::remove_if(rotations.begin(), rotations.end(), [&](int r) {
+				return std::find(locations.begin(), locations.end(), r) == locations.end();
+			}), rotations.end());
+		};
+		keepTracked(edgeRotations, edges);
+		keepTracked(cornerRotations, corners);
 		printf("Delta compression - building delta\n");
-		RubikPDB pdb2(&cube, goal, edges, corners);
+		RubikPDB pdb2(&cube, goal, edges, edgeRotations, corners, cornerRotations);
 		pdb2.BuildPDB(goal, threads);
 		pdb.DeltaCompress(&pdb2, goal, true);
 	}
